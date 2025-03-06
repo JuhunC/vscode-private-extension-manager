@@ -20,6 +20,7 @@
     "command.extension.switchChannels.title": "Switch Release Channels...",
     "command.registry.add.title": "Add User Registry...",
     "command.registry.remove.title": "Remove User Registry",
+    "command.registry.addSWDP.title": "Add Default Registry for SWDP Marketplace",
     "viewsContainers.activitybar.privateExtensions.title": "Private Extensions",
     "views.privateExtensions.extensions.name": "Extensions",
     "views.privateExtensions.extensions.noExtensions": "No private extensions found. [learn more](https://github.com/joelspadin-garmin/vscode-private-extension-manager/tree/master/extension#readme)",

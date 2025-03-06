@@ -39,7 +39,8 @@
         "onCommand:privateExtensions.configureWorkspaceRegistries",
         "onCommand:privateExtensions.configureRecommendedExtensions",
         "onCommand:privateExtensions.registry.add",
-        "onCommand:privateExtensions.registry.remove"
+        "onCommand:privateExtensions.registry.remove",
+        "onCommand:privateExtensions.registry.addSWDP"
     ],
     "main": "./dist/extension.js",
     "contributes": {
@@ -163,6 +164,11 @@
                 "command": "privateExtensions.registry.remove",
                 "title": "%command.registry.remove.title%",
                 "category": "%command.category%"
+            },
+            {
+                "command": "privateExtensions.registry.addSWDP",
+                "title": "%command.registry.addSWDP.title%",
+                "category": "%command.category%"
             }
         ],
         "viewsContainers": {
@@ -229,6 +235,11 @@
                     "group": "registry"
                 },
                 {
+                    "command": "privateExtensions.registry.addSWDP",
+                    "when": "view == privateExtensions.extensions",
+                    "group": "registry"
+                },
+                {
                     "command": "privateExtensions.configureRecommendedExtensions",
                     "when": "view == privateExtensions.recommended && workbenchState != empty",
                     "group": "navigation"
@@ -268,6 +279,11 @@
                 {
                     "command": "privateExtensions.registry.remove",
                     "when": "view == privateExtensions.extensions && viewItem == registry.user",
+                    "group": "registries"
+                },
+                {
+                    "command": "privateExtensions.registry.addSWDP",
+                    "when": "view == privateExtensions.extensions",
                     "group": "registries"
                 }
             ],

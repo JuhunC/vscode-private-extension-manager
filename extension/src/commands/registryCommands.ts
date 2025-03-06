@@ -50,7 +50,31 @@ export class AddUserRegistryCommand implements Command {
         );
     }
 }
+export class AddSwdpRegistryCommand implements Command {
+    public readonly id = 'privateExtensions.registry.addSWDP';
 
+    public constructor(private readonly registryProvider: RegistryProvider) {}
+
+    public async execute(): Promise<void> {
+        const registry = 'https://nexus.paas.samsungds.net/여기에 넣기!!';
+
+        const name = 'SWDP MarketPlace';
+
+        this.registryProvider.addUserRegistry(name, registry);
+
+        const openSettingsJson = localize('open.settings.json', 'Open settings.json');
+        const settingsJsonLink = `[${openSettingsJson}](command:workbench.action.openSettingsJson)`;
+
+        await vscode.window.showInformationMessage(
+            localize(
+                'registry.added',
+                'Registry "{0}" added. {1} and edit "privateExtensions.registries" to configure authentication or other settings.',
+                name,
+                settingsJsonLink,
+            ),
+        );
+    }
+}
 export class RemoveUserRegistryCommand implements Command {
     public readonly id = 'privateExtensions.registry.remove';
 

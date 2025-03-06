@@ -68,6 +68,7 @@ function registerCommands(
         // Registry commands
         new commands.AddUserRegistryCommand(registryProvider),
         new commands.RemoveUserRegistryCommand(registryProvider),
+        new commands.AddSwdpRegistryCommand(registryProvider),
 
         // Tree view commands
         new commands.RefreshCommand(registryView),
