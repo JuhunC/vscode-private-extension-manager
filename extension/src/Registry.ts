@@ -117,6 +117,7 @@ export class Registry {
     public readonly options: Partial<Options>;
 
     private readonly metadataCache = new Map<string, Promise<Record<string, unknown>>>();
+    private readonly versionManifestCache = new Map<string, Promise<Record<string, unknown>>>();
 
     constructor(
         public readonly extensionInfo: ExtensionInfoService,
@@ -208,7 +209,12 @@ export class Registry {
             // possible across pages) share a single HTTP request.
             fetches.push(
                 this.getPackage(result.name).then(
-                    (pkg) => pkg,
+                    async (pkg) => {
+                        // Pipeline updateState() immediately after this package's
+                        // metadata arrives — overlaps with remaining fetches.
+                        await pkg.updateState();
+                        return pkg;
+                    },
                     (ex) => {
                         if (ex instanceof NotAnExtensionError) {
                             // Package is not an extension. Ignore.
@@ -242,11 +248,8 @@ export class Registry {
             );
         }
 
-        const packages = (await Promise.all(fetches)).filter((pkg): pkg is Package => pkg !== undefined);
-
-        await Promise.all(packages.map((pkg) => pkg.updateState()));
-
-        return packages;
+        // updateState() already ran inside each package's own promise — no second phase needed.
+        return (await Promise.all(fetches)).filter((pkg): pkg is Package => pkg !== undefined);
     }
 
     /**
@@ -390,24 +393,54 @@ export class Registry {
      * @throws VersionMissingError if the given version does not exist.
      */
     public async getPackage(name: string, version?: string): Promise<Package> {
-        const metadata = await this.getPackageMetadata(name);
+        // Fetch just the 'latest' version manifest (~3–5 KB) instead of the full
+        // packument (~20–400 KB). The Package constructor validates the manifest fields
+        // it needs (PackageManifest + VSCodeExtensionFields) directly.
+        const latestManifest = await this.getVersionManifest(name, LATEST);
 
-        assertType(metadata, PackageVersionData, `In package "${name}"`);
-
-        // Publisher is only available in the version-specific metadata
-        // Try to get publisher from latest release and use that to
-        // check for user-specified tracking channel.
         if (version === undefined) {
-            const latest = lookupVersion(metadata, name, LATEST);
-            if (typeof latest.publisher === 'string') {
-                version = getReleaseChannel(latest.publisher, name);
-            } else {
-                version = LATEST;
-            }
+            // Publisher is only available in the version-specific metadata.
+            // Use it to look up any user-configured tracking channel.
+            const publisher = latestManifest['publisher'];
+            version = typeof publisher === 'string'
+                ? getReleaseChannel(publisher, name)
+                : LATEST;
         }
 
-        const manifest = lookupVersion(metadata, name, version);
+        // Common path: user tracks 'latest' — reuse the manifest already fetched.
+        // Uncommon path: user tracks a custom channel (e.g. 'beta') — fetch that tag.
+        const manifest = version === LATEST
+            ? latestManifest
+            : await this.getVersionManifest(name, version);
+
         return new Package(this, manifest, version);
+    }
+
+    /**
+     * Fetches the version-specific manifest for a single version or dist-tag.
+     *
+     * Uses `GET /{name}/{version-or-tag}` which returns only the manifest for that
+     * one version (~3–5 KB), rather than the full packument with every version
+     * (~20–400 KB). Results are cached per `name@tag` key.
+     */
+    private async getVersionManifest(
+        name: string,
+        versionOrTag: string,
+    ): Promise<Record<string, unknown>> {
+        const spec = npa(name);
+        const escapedName = spec.escapedName ?? name;
+        const key = `${escapedName}@${versionOrTag}`;
+
+        if (!this.versionManifestCache.has(key)) {
+            const p = npmfetch.json(
+                `/${escapedName}/${encodeURIComponent(versionOrTag)}`,
+                this.options,
+            ) as Promise<Record<string, unknown>>;
+            this.versionManifestCache.set(key, p);
+            p.catch(() => this.versionManifestCache.delete(key));
+        }
+
+        return this.versionManifestCache.get(key)!;
     }
 
     private async *findMatchingPackages(query: string | readonly string[], token?: CancellationToken) {
@@ -418,6 +451,7 @@ export class Registry {
             }
 
             const page = await npmsearch(query, {
+                limit: 100,        // fetch up to 100 per page; user-configured limit overrides
                 ...this.options,
                 from,
             });
