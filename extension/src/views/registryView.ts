@@ -240,20 +240,7 @@ class RegistryItem extends BaseItem {
     }
 
     public async getChildren(): Promise<Element[]> {
-        // Get the list of matching package names from the search API (fast — one
-        // paginated call, no per-package metadata fetches).
-        const searchResults = await this.registry.getSearchResults();
-
-        if (searchResults.length === 0) {
-            return [NO_EXTENSIONS_MESSAGE];
-        }
-
-        // Fetch full Package metadata in parallel batches, then update install state.
-        // This replaces the original sequential per-package fetch loop and is
-        // significantly faster for registries with many extensions.
-        const packages = await this.registry.loadPackagesFromResults(
-            searchResults.map((r) => r.name),
-        );
+        const packages = await this.registry.getPackages();
 
         packages.sort(Package.compare);
 

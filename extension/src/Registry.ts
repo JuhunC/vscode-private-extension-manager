@@ -188,47 +188,61 @@ export class Registry {
     /**
      * Gets all packages matching the registry options.
      *
+     * Metadata fetches are fired immediately as each search result arrives
+     * (pipelined with search pagination) and run with full concurrency, so
+     * the wall-clock time is roughly max(search_time, slowest_metadata_fetch)
+     * rather than search_time + N × metadata_fetch_time.
+     *
      * @param token Token to use to cancel the search.
      */
     public async getPackages(token?: CancellationToken): Promise<Package[]> {
-        const packages: Package[] = [];
+        const fetches: Promise<Package | undefined>[] = [];
 
         for await (const result of this.findMatchingPackages(this.query, token)) {
             if (token?.isCancellationRequested) {
                 break;
             }
 
-            try {
-                packages.push(await this.getPackage(result.name));
-            } catch (ex) {
-                if (ex instanceof NotAnExtensionError) {
-                    // Package is not an extension. Ignore.
-                } else if (ex instanceof VersionMissingError) {
-                    // Requested package version does not exist
-                    const openSettingsJson = localize('open.settings.json', 'Open settings.json');
-                    const settingsJsonLink = `[${openSettingsJson}](command:workbench.action.openSettingsJson)`;
+            // Start the metadata fetch immediately — don't wait for the next
+            // search page. The metadata cache ensures duplicate names (rare but
+            // possible across pages) share a single HTTP request.
+            fetches.push(
+                this.getPackage(result.name).then(
+                    (pkg) => pkg,
+                    (ex) => {
+                        if (ex instanceof NotAnExtensionError) {
+                            // Package is not an extension. Ignore.
+                        } else if (ex instanceof VersionMissingError) {
+                            // Requested package version does not exist
+                            const openSettingsJson = localize('open.settings.json', 'Open settings.json');
+                            const settingsJsonLink = `[${openSettingsJson}](command:workbench.action.openSettingsJson)`;
 
-                    // TODO: Add a quick link to reset to 'latest' via command
-                    window.showErrorMessage(
-                        localize(
-                            'invalid.channel',
-                            '{0} Your "privateExtensions.channels" setting may be invalid. {1} to fix.',
-                            ex.message,
-                            settingsJsonLink,
-                        ),
-                    );
-                } else {
-                    getLogger().log(
-                        localize(
-                            'warn.discarding.package',
-                            'Warning: Discarding package {0}:\n{1}',
-                            result.name,
-                            toString(ex),
-                        ),
-                    );
-                }
-            }
+                            // TODO: Add a quick link to reset to 'latest' via command
+                            window.showErrorMessage(
+                                localize(
+                                    'invalid.channel',
+                                    '{0} Your "privateExtensions.channels" setting may be invalid. {1} to fix.',
+                                    ex.message,
+                                    settingsJsonLink,
+                                ),
+                            );
+                        } else {
+                            getLogger().log(
+                                localize(
+                                    'warn.discarding.package',
+                                    'Warning: Discarding package {0}:\n{1}',
+                                    result.name,
+                                    toString(ex),
+                                ),
+                            );
+                        }
+                        return undefined;
+                    },
+                ),
+            );
         }
+
+        const packages = (await Promise.all(fetches)).filter((pkg): pkg is Package => pkg !== undefined);
 
         await Promise.all(packages.map((pkg) => pkg.updateState()));
 
