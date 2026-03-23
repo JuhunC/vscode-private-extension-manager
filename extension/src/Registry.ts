@@ -109,10 +109,14 @@ export class Registry {
         return nameA < nameB ? -1 : nameA > nameB ? 1 : 0;
     }
 
+    private static readonly METADATA_CONCURRENCY = 10;
+
     public readonly query: string | string[];
     public readonly enablePagination: boolean;
 
     public readonly options: Partial<Options>;
+
+    private readonly metadataCache = new Map<string, Promise<Record<string, unknown>>>();
 
     constructor(
         public readonly extensionInfo: ExtensionInfoService,
@@ -232,11 +236,101 @@ export class Registry {
     }
 
     /**
+     * Gets the raw search results for packages in this registry, without fetching
+     * per-package metadata. Results are available quickly (one paginated search API
+     * call) and contain name, version, and description suitable for Phase 1 display.
+     *
+     * @param token Token to use to cancel the search.
+     */
+    public async getSearchResults(token?: CancellationToken): Promise<npmsearch.Result[]> {
+        const results: npmsearch.Result[] = [];
+        for await (const result of this.findMatchingPackages(this.query, token)) {
+            if (token?.isCancellationRequested) {
+                break;
+            }
+            results.push(result);
+        }
+        return results;
+    }
+
+    /**
+     * Loads full Package objects for a list of package names in parallel batches,
+     * then updates each package's install state. Used for Phase 2 enrichment after
+     * fast search results have already been shown.
+     *
+     * @param names Package names returned by getSearchResults().
+     * @param token Token to use to cancel loading.
+     */
+    public async loadPackagesFromResults(names: string[], token?: CancellationToken): Promise<Package[]> {
+        const packages: Package[] = [];
+
+        for (let i = 0; i < names.length; i += Registry.METADATA_CONCURRENCY) {
+            if (token?.isCancellationRequested) {
+                break;
+            }
+
+            const batch = names.slice(i, i + Registry.METADATA_CONCURRENCY);
+            const results = await Promise.all(
+                batch.map(async (name) => {
+                    try {
+                        return await this.getPackage(name);
+                    } catch (ex) {
+                        if (ex instanceof NotAnExtensionError) {
+                            // Package is not an extension. Ignore.
+                        } else if (ex instanceof VersionMissingError) {
+                            const openSettingsJson = localize('open.settings.json', 'Open settings.json');
+                            const settingsJsonLink = `[${openSettingsJson}](command:workbench.action.openSettingsJson)`;
+                            window.showErrorMessage(
+                                localize(
+                                    'invalid.channel',
+                                    '{0} Your "privateExtensions.channels" setting may be invalid. {1} to fix.',
+                                    ex.message,
+                                    settingsJsonLink,
+                                ),
+                            );
+                        } else {
+                            getLogger().log(
+                                localize(
+                                    'warn.discarding.package',
+                                    'Warning: Discarding package {0}:\n{1}',
+                                    name,
+                                    toString(ex),
+                                ),
+                            );
+                        }
+                        return undefined;
+                    }
+                }),
+            );
+
+            for (const pkg of results) {
+                if (pkg !== undefined) {
+                    packages.push(pkg);
+                }
+            }
+        }
+
+        await Promise.all(packages.map((pkg) => pkg.updateState()));
+
+        return packages;
+    }
+
+    /**
      * Gets the full package metadata for a package.
+     *
+     * Results are cached per registry instance so concurrent callers share one HTTP request.
      */
     public async getPackageMetadata(name: string): Promise<Record<string, unknown>> {
         const spec = npa(name);
-        return await npmfetch.json(`/${spec.escapedName}`, this.options);
+        const key = spec.escapedName ?? name;
+
+        if (!this.metadataCache.has(key)) {
+            const p = npmfetch.json(`/${key}`, this.options) as Promise<Record<string, unknown>>;
+            this.metadataCache.set(key, p);
+            p.catch(() => this.metadataCache.delete(key));
+        }
+
+        return this.metadataCache.get(key)!;
     }
 
     /**

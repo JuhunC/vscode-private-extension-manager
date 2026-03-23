@@ -1,3 +1,4 @@
+import * as npmsearch from 'libnpmsearch';
 import * as vscode from 'vscode';
 import { Disposable, EventEmitter, TreeDataProvider, TreeItem } from 'vscode';
 import * as nls from 'vscode-nls/node';
@@ -86,7 +87,7 @@ export class RegistryView implements Disposable {
     }
 }
 
-type Element = Registry | Package | string;
+type Element = Registry | Package | npmsearch.Result | string;
 
 /**
  * TreeDataProvider for the Extensions section of the sidebar panel.
@@ -98,6 +99,7 @@ class ExtensionsProvider implements TreeDataProvider<Element>, Disposable {
     protected disposable: Disposable;
 
     private children?: Registry[];
+    private registryItems = new Map<Registry, RegistryItem>();
 
     constructor(protected readonly registryProvider: RegistryProvider) {
         this.disposable = Disposable.from(
@@ -112,6 +114,15 @@ class ExtensionsProvider implements TreeDataProvider<Element>, Disposable {
     }
 
     public getTreeItem(element: Element): BaseItem {
+        if (element instanceof Registry) {
+            if (!this.registryItems.has(element)) {
+                this.registryItems.set(
+                    element,
+                    new RegistryItem(element, (item) => this._onDidChangeTreeData.fire(item)),
+                );
+            }
+            return this.registryItems.get(element)!;
+        }
         return elementToNode(element);
     }
 
@@ -124,6 +135,8 @@ class ExtensionsProvider implements TreeDataProvider<Element>, Disposable {
     }
 
     public refresh() {
+        this.registryItems.forEach((item) => item.reset());
+        this.registryItems.clear();
         this.children = undefined;
         this._onDidChangeTreeData.fire(undefined);
     }
@@ -232,27 +245,71 @@ class MessageItem extends BaseItem {
 }
 
 class RegistryItem extends BaseItem {
-    constructor(public readonly registry: Registry) {
+    private enrichedPackages?: Package[];
+    private loading = false;
+    private loadGeneration = 0;
+
+    constructor(
+        public readonly registry: Registry,
+        private readonly onEnriched: (item: RegistryItem) => void,
+    ) {
         super(registry.name, vscode.TreeItemCollapsibleState.Expanded);
 
-        this.contextValue = `registry.${this.registry.source}`;
-        this.resourceUri = this.registry.uri;
+        this.contextValue = `registry.${registry.source}`;
+        this.resourceUri = registry.uri;
     }
 
-    public async getExtensions() {
-        const children = await this.registry.getPackages();
-        children.sort(Package.compare);
-        return children;
+    public reset() {
+        this.enrichedPackages = undefined;
+        this.loading = false;
+        this.loadGeneration++;
     }
 
     public async getChildren(): Promise<Element[]> {
-        const children = await this.getExtensions();
+        // Phase 2 complete: return fully enriched, sorted extension items.
+        if (this.enrichedPackages !== undefined) {
+            if (this.enrichedPackages.length === 0) {
+                return [NO_EXTENSIONS_MESSAGE];
+            }
+            return [...this.enrichedPackages].sort(Package.compare);
+        }
 
-        if (children.length > 0) {
-            return children;
-        } else {
+        // Phase 1: fetch search results (fast — paginated npm search, no per-package HTTP calls).
+        const searchResults = await this.registry.getSearchResults();
+
+        if (searchResults.length === 0) {
             return [NO_EXTENSIONS_MESSAGE];
         }
+
+        // Kick off Phase 2 in the background (only once per load cycle).
+        if (!this.loading) {
+            this.loading = true;
+            const gen = this.loadGeneration;
+            this.registry
+                .loadPackagesFromResults(searchResults.map((r) => r.name))
+                .then((pkgs) => {
+                    if (this.loadGeneration === gen) {
+                        this.enrichedPackages = pkgs;
+                        this.onEnriched(this);
+                    }
+                })
+                .catch(() => {
+                    if (this.loadGeneration === gen) {
+                        this.loading = false;
+                    }
+                });
+        }
+
+        // Return Phase 1 placeholders immediately.
+        return searchResults;
+    }
+}
+
+class SearchResultItem extends BaseItem {
+    constructor(result: npmsearch.Result) {
+        super(result.name, vscode.TreeItemCollapsibleState.None);
+        this.description = result.version;
+        this.tooltip = result.description ?? '';
     }
 }
 
@@ -290,15 +347,12 @@ class ExtensionItem extends BaseItem {
 }
 
 function elementToNode(element: Element): BaseItem {
-    if (element instanceof Registry) {
-        return new RegistryItem(element);
-    }
     if (element instanceof Package) {
         return new ExtensionItem(element);
     }
     if (typeof element === 'string') {
         return new MessageItem(element);
     }
-
-    throw new Error('Unexpected object: ' + element);
+    // npmsearch.Result — Phase 1 placeholder shown while full metadata loads.
+    return new SearchResultItem(element as npmsearch.Result);
 }

@@ -59,7 +59,7 @@ export function memoize(_target: unknown, _key: string, descriptor: PropertyDesc
     const newFunc = memoizeOne(oldFunc);
 
     descriptor.value = function (...args: any[]) {
-        return newFunc.call(this, args);
+        return newFunc.apply(this, args);
     };
 }
 
