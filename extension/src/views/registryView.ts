@@ -118,7 +118,7 @@ class ExtensionsProvider implements TreeDataProvider<Element>, Disposable {
             if (!this.registryItems.has(element)) {
                 this.registryItems.set(
                     element,
-                    new RegistryItem(element, (item) => this._onDidChangeTreeData.fire(item)),
+                    new RegistryItem(element, () => this._onDidChangeTreeData.fire(undefined)),
                 );
             }
             return this.registryItems.get(element)!;
@@ -251,7 +251,7 @@ class RegistryItem extends BaseItem {
 
     constructor(
         public readonly registry: Registry,
-        private readonly onEnriched: (item: RegistryItem) => void,
+        private readonly onEnriched: () => void,
     ) {
         super(registry.name, vscode.TreeItemCollapsibleState.Expanded);
 
@@ -290,7 +290,7 @@ class RegistryItem extends BaseItem {
                 .then((pkgs) => {
                     if (this.loadGeneration === gen) {
                         this.enrichedPackages = pkgs;
-                        this.onEnriched(this);
+                        this.onEnriched();
                     }
                 })
                 .catch(() => {
