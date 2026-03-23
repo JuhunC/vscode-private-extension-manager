@@ -15,7 +15,7 @@ import { ExtensionInfoService } from './extensionInfo';
 import { getLogger } from './logger';
 import { NotAnExtensionError, Package } from './Package';
 import { getReleaseChannel, LATEST } from './releaseChannel';
-import { assertType, options } from './typeUtil';
+import { options } from './typeUtil';
 import { getNpmCacheDir, getNpmDownloadDir, uriEquals, toString } from './util';
 
 const localize = nls.loadMessageBundle();
@@ -74,7 +74,7 @@ export interface RegistryOptions {
     /**
      * Number of results to limit each query to when requesting package results.
      *
-     * Default: 20
+     * Default: 100
      */
     limit: number;
 }
@@ -108,8 +108,6 @@ export class Registry {
 
         return nameA < nameB ? -1 : nameA > nameB ? 1 : 0;
     }
-
-    private static readonly METADATA_CONCURRENCY = 10;
 
     public readonly query: string | string[];
     public readonly enablePagination: boolean;
@@ -253,86 +251,6 @@ export class Registry {
     }
 
     /**
-     * Gets the raw search results for packages in this registry, without fetching
-     * per-package metadata. Results are available quickly (one paginated search API
-     * call) and contain name, version, and description suitable for Phase 1 display.
-     *
-     * @param token Token to use to cancel the search.
-     */
-    public async getSearchResults(token?: CancellationToken): Promise<npmsearch.Result[]> {
-        const results: npmsearch.Result[] = [];
-        for await (const result of this.findMatchingPackages(this.query, token)) {
-            if (token?.isCancellationRequested) {
-                break;
-            }
-            results.push(result);
-        }
-        return results;
-    }
-
-    /**
-     * Loads full Package objects for a list of package names in parallel batches,
-     * then updates each package's install state. Used for Phase 2 enrichment after
-     * fast search results have already been shown.
-     *
-     * @param names Package names returned by getSearchResults().
-     * @param token Token to use to cancel loading.
-     */
-    public async loadPackagesFromResults(names: string[], token?: CancellationToken): Promise<Package[]> {
-        const packages: Package[] = [];
-
-        for (let i = 0; i < names.length; i += Registry.METADATA_CONCURRENCY) {
-            if (token?.isCancellationRequested) {
-                break;
-            }
-
-            const batch = names.slice(i, i + Registry.METADATA_CONCURRENCY);
-            const results = await Promise.all(
-                batch.map(async (name) => {
-                    try {
-                        return await this.getPackage(name);
-                    } catch (ex) {
-                        if (ex instanceof NotAnExtensionError) {
-                            // Package is not an extension. Ignore.
-                        } else if (ex instanceof VersionMissingError) {
-                            const openSettingsJson = localize('open.settings.json', 'Open settings.json');
-                            const settingsJsonLink = `[${openSettingsJson}](command:workbench.action.openSettingsJson)`;
-                            window.showErrorMessage(
-                                localize(
-                                    'invalid.channel',
-                                    '{0} Your "privateExtensions.channels" setting may be invalid. {1} to fix.',
-                                    ex.message,
-                                    settingsJsonLink,
-                                ),
-                            );
-                        } else {
-                            getLogger().log(
-                                localize(
-                                    'warn.discarding.package',
-                                    'Warning: Discarding package {0}:\n{1}',
-                                    name,
-                                    toString(ex),
-                                ),
-                            );
-                        }
-                        return undefined;
-                    }
-                }),
-            );
-
-            for (const pkg of results) {
-                if (pkg !== undefined) {
-                    packages.push(pkg);
-                }
-            }
-        }
-
-        await Promise.all(packages.map((pkg) => pkg.updateState()));
-
-        return packages;
-    }
-
-    /**
      * Gets the full package metadata for a package.
      *
      * Results are cached per registry instance so concurrent callers share one HTTP request.
@@ -409,9 +327,14 @@ export class Registry {
 
         // Common path: user tracks 'latest' — reuse the manifest already fetched.
         // Uncommon path: user tracks a custom channel (e.g. 'beta') — fetch that tag.
+        // If the tag doesn't exist the registry returns a 404; translate that to a
+        // VersionMissingError so callers can surface the "channels setting may be
+        // invalid" message to the user.
         const manifest = version === LATEST
             ? latestManifest
-            : await this.getVersionManifest(name, version);
+            : await this.getVersionManifest(name, version).catch(() => {
+                throw new VersionMissingError(name, version!);
+            });
 
         return new Package(this, manifest, version);
     }
@@ -504,19 +427,3 @@ function getVersionInfo(metadata: PackageVersionData, version: string): VersionI
     };
 }
 
-/**
-    Finds the version-specific metadata for a package given a version
-    or dist-tag.
-*/
-function lookupVersion(metadata: PackageVersionData, name: string, versionOrTag: string) {
-    if (versionOrTag in metadata['dist-tags']) {
-        versionOrTag = metadata['dist-tags'][versionOrTag];
-    }
-
-    const result = metadata.versions[versionOrTag];
-    if (result === undefined) {
-        throw new VersionMissingError(name, versionOrTag);
-    }
-
-    return result;
-}
