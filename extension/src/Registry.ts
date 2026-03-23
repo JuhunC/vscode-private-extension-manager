@@ -109,10 +109,18 @@ export class Registry {
         return nameA < nameB ? -1 : nameA > nameB ? 1 : 0;
     }
 
+    private static readonly METADATA_CONCURRENCY = 10;
+
     public readonly query: string | string[];
     public readonly enablePagination: boolean;
 
     public readonly options: Partial<Options>;
+
+    /**
+     * In-memory cache of in-flight or completed metadata fetches, keyed by escaped package name.
+     * Storing the Promise directly deduplicates concurrent requests for the same package.
+     */
+    private readonly metadataCache = new Map<string, Promise<Record<string, unknown>>>();
 
     constructor(
         public readonly extensionInfo: ExtensionInfoService,
@@ -233,10 +241,85 @@ export class Registry {
 
     /**
      * Gets the full package metadata for a package.
+     *
+     * Results are cached in memory for the lifetime of this Registry instance.
+     * Concurrent calls for the same package share the same in-flight request.
      */
     public async getPackageMetadata(name: string): Promise<Record<string, unknown>> {
         const spec = npa(name);
-        return await npmfetch.json(`/${spec.escapedName}`, this.options);
+        const key = spec.escapedName ?? name;
+
+        if (!this.metadataCache.has(key)) {
+            const p = npmfetch.json(`/${key}`, this.options) as Promise<Record<string, unknown>>;
+            this.metadataCache.set(key, p);
+            // Evict failed requests so they can be retried.
+            p.catch(() => this.metadataCache.delete(key));
+        }
+
+        return this.metadataCache.get(key)!;
+    }
+
+    /**
+     * Returns search results for all packages matching the registry's query,
+     * without fetching per-package metadata. Use this to show the initial list
+     * quickly, then call {@link loadPackages} in the background for full details.
+     */
+    public async getSearchList(token?: CancellationToken): Promise<npmsearch.Result[]> {
+        const results: npmsearch.Result[] = [];
+        for await (const result of this.findMatchingPackages(this.query, token)) {
+            if (token?.isCancellationRequested) {
+                break;
+            }
+            results.push(result);
+        }
+        return results;
+    }
+
+    /**
+     * Fetches full package metadata for the given package names in parallel
+     * and returns the resolved {@link Package} objects. Packages that fail to
+     * load (e.g. not a VS Code extension) are silently skipped or logged.
+     *
+     * Call this after {@link getSearchList} to enrich the initial quick list.
+     */
+    public async loadPackages(names: string[], token?: CancellationToken): Promise<Package[]> {
+        const packages: Package[] = [];
+
+        for (let i = 0; i < names.length; i += Registry.METADATA_CONCURRENCY) {
+            if (token?.isCancellationRequested) {
+                break;
+            }
+
+            const batch = names.slice(i, i + Registry.METADATA_CONCURRENCY);
+            const results = await Promise.all(
+                batch.map(async (n) => {
+                    try {
+                        return await this.getPackage(n);
+                    } catch (ex) {
+                        if (!(ex instanceof NotAnExtensionError)) {
+                            getLogger().log(
+                                localize(
+                                    'warn.discarding.package',
+                                    'Warning: Discarding package {0}:\n{1}',
+                                    n,
+                                    toString(ex),
+                                ),
+                            );
+                        }
+                        return undefined;
+                    }
+                }),
+            );
+
+            for (const pkg of results) {
+                if (pkg !== undefined) {
+                    packages.push(pkg);
+                }
+            }
+        }
+
+        await Promise.all(packages.map((pkg) => pkg.updateState()));
+        return packages;
     }
 
     /**

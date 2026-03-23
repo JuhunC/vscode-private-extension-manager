@@ -1,3 +1,4 @@
+import * as npmsearch from 'libnpmsearch';
 import * as vscode from 'vscode';
 import { Disposable, EventEmitter, TreeDataProvider, TreeItem } from 'vscode';
 import * as nls from 'vscode-nls/node';
@@ -86,7 +87,7 @@ export class RegistryView implements Disposable {
     }
 }
 
-type Element = Registry | Package | string;
+type Element = Registry | Package | npmsearch.Result | string;
 
 /**
  * TreeDataProvider for the Extensions section of the sidebar panel.
@@ -98,6 +99,7 @@ class ExtensionsProvider implements TreeDataProvider<Element>, Disposable {
     protected disposable: Disposable;
 
     private children?: Registry[];
+    private registryItems = new Map<Registry, RegistryItem>();
 
     constructor(protected readonly registryProvider: RegistryProvider) {
         this.disposable = Disposable.from(
@@ -112,6 +114,15 @@ class ExtensionsProvider implements TreeDataProvider<Element>, Disposable {
     }
 
     public getTreeItem(element: Element): BaseItem {
+        if (element instanceof Registry) {
+            if (!this.registryItems.has(element)) {
+                this.registryItems.set(
+                    element,
+                    new RegistryItem(element, (item) => this._onDidChangeTreeData.fire(item)),
+                );
+            }
+            return this.registryItems.get(element)!;
+        }
         return elementToNode(element);
     }
 
@@ -124,6 +135,8 @@ class ExtensionsProvider implements TreeDataProvider<Element>, Disposable {
     }
 
     public refresh() {
+        this.registryItems.forEach((item) => item.reset());
+        this.registryItems.clear();
         this.children = undefined;
         this._onDidChangeTreeData.fire(undefined);
     }
@@ -232,27 +245,64 @@ class MessageItem extends BaseItem {
 }
 
 class RegistryItem extends BaseItem {
-    constructor(public readonly registry: Registry) {
+    private enrichedPackages?: Package[];
+    private loading = false;
+
+    constructor(
+        public readonly registry: Registry,
+        private readonly onEnriched: (item: RegistryItem) => void,
+    ) {
         super(registry.name, vscode.TreeItemCollapsibleState.Expanded);
 
         this.contextValue = `registry.${this.registry.source}`;
         this.resourceUri = this.registry.uri;
     }
 
-    public async getExtensions() {
-        const children = await this.registry.getPackages();
-        children.sort(Package.compare);
-        return children;
+    /**
+     * Resets cached state so the next `getChildren()` call starts fresh.
+     */
+    public reset() {
+        this.enrichedPackages = undefined;
+        this.loading = false;
     }
 
     public async getChildren(): Promise<Element[]> {
-        const children = await this.getExtensions();
+        // Phase 2: enrichment already complete — return full Package items.
+        if (this.enrichedPackages) {
+            const sorted = [...this.enrichedPackages].sort(Package.compare);
+            return sorted.length > 0 ? sorted : [NO_EXTENSIONS_MESSAGE];
+        }
 
-        if (children.length > 0) {
-            return children;
-        } else {
+        // Phase 1: get the list from search quickly (no per-package metadata).
+        const results = await this.registry.getSearchList();
+
+        if (results.length === 0) {
             return [NO_EXTENSIONS_MESSAGE];
         }
+
+        // Kick off background metadata fetch once per load cycle.
+        if (!this.loading) {
+            this.loading = true;
+            this.registry.loadPackages(results.map((r) => r.name)).then((pkgs) => {
+                this.enrichedPackages = pkgs;
+                this.onEnriched(this);
+            });
+        }
+
+        // Return search results as elements; getTreeItem() maps them to SearchResultItems.
+        return results;
+    }
+}
+
+/**
+ * A lightweight tree item built from npm search data, shown while full package
+ * metadata loads in the background. Has no state icon or install information.
+ */
+class SearchResultItem extends BaseItem {
+    constructor(result: npmsearch.Result) {
+        super(result.name, vscode.TreeItemCollapsibleState.None);
+        this.description = result.version;
+        this.tooltip = result.description;
     }
 }
 
@@ -290,14 +340,15 @@ class ExtensionItem extends BaseItem {
 }
 
 function elementToNode(element: Element): BaseItem {
-    if (element instanceof Registry) {
-        return new RegistryItem(element);
-    }
     if (element instanceof Package) {
         return new ExtensionItem(element);
     }
     if (typeof element === 'string') {
         return new MessageItem(element);
+    }
+    if (!(element instanceof Registry)) {
+        // npmsearch.Result — shown while metadata loads in the background.
+        return new SearchResultItem(element);
     }
 
     throw new Error('Unexpected object: ' + element);
